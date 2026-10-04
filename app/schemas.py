@@ -181,6 +181,23 @@ class CorpusIn(BaseModel):
         return v
 
 
+class PreviewRequest(BaseModel):
+    """POST /corpus/preview 的请求体：拟登记版本 + 目标日期。
+
+    预演假定该文档版本已登记，比较库中原有引用在登记前后的审查结果；
+    整个预演在事务内完成并回滚，不会在库中留下任何数据。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    document: CorpusIn = Field(
+        ..., description="拟登记的文档版本（格式与 POST /corpus 完全相同）"
+    )
+    target_at: Optional[UtcDatetime] = Field(
+        None, description="目标日期时间；缺省为当前 UTC 时间；仅日期按 UTC 00:00"
+    )
+
+
 class AuditRequest(BaseModel):
     """POST /audit 的请求体（全部可选，默认审查全部存量引用）。"""
 

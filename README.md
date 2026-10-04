@@ -124,6 +124,62 @@ DB_PATH=./data/regulations.db uvicorn app.main:app --reload
 - 条款可省略 `effective_at`（继承文档版本）；`expires_at` 可省略。
 - 响应 `201` 返回各类计数与 `warnings`；重复写入 `409`。
 
+### `POST /corpus/preview` —— 登记预演（不落库）
+
+正式登记前预演一份拟登记版本：按与 `POST /corpus` 完全相同的格式提交
+`document`，并给定 `target_at`（缺省为当前 UTC 时间）。服务在同一库
+状态上分别做**登记前**与**假定登记后**两次引用审查，仅返回**结论
+（status）、解析版本（resolved）或链路（chains）发生变化**的引用，
+按原引用 ID 升序给出前后两份完整审查结果（格式同 `/audit` 的单条结果）。
+
+```json
+{
+  "document": {
+    "doc_id": "REPEAL-ACT",
+    "version": "2020",
+    "effective_at": "2020-06-01T00:00:00Z",
+    "clauses": [{"clause_id": "ART-1", "effective_at": "2020-06-01T00:00:00Z"}],
+    "revisions": [{"kind": "repeals",
+                   "predecessor_doc": "OLD-LAW",
+                   "predecessor_version": "2000",
+                   "predecessor_clause": "ART-1"}]
+  },
+  "target_at": "2021-01-01T00:00:00Z"
+}
+```
+
+响应（节选）：
+
+```json
+{
+  "doc_id": "REPEAL-ACT",
+  "version": "2020",
+  "target_at": "2021-01-01T00:00:00+00:00",
+  "total_citations": 1,
+  "changed": 1,
+  "warnings": [],
+  "changes": [
+    {
+      "citation_id": 1,
+      "before": {"status": "effective",
+                  "resolved": {"doc_id": "OLD-LAW", "version": "2000",
+                               "clause_id": "ART-1"}, "...": "..."},
+      "after":  {"status": "repealed", "resolved": null, "...": "..."}
+    }
+  ]
+}
+```
+
+语义约定：
+
+- 修订关系可跨文档、跨条号影响旧引用；固定引用、分支歧义、纯废止
+  时刻等判定与 `/audit` 完全一致（同一解析器、同一目标日期）。
+- 除草案本身外，前后两次审查基于**同一份库状态**；拟登记版本自带的
+  引用**不参与**比较（`total_citations` 只统计库中原有引用）。
+- 重复版本返回 `409`、非法修订关系返回 `422`，与 `POST /corpus` 相同。
+- 无论预演成功或失败，都不会在库中留下文档、条款、修订关系或引用
+  （事务内审查后整体回滚），之后可原样登记同一版本。
+
 ### `POST /audit` —— 引用审查
 
 请求体全部字段可选；`target_at` 缺省为**当前 UTC 时间**。可用
@@ -200,7 +256,28 @@ curl -s -X POST http://localhost:8000/corpus \
                    "target_doc": "OLD-LAW", "target_clause": "ART-1"}]
   }'
 
-# 3) 登记废止令：2020-06-01 生效，repeals 不带 successor（纯废止）
+# 3) 登记预演：假定废止令已登记，比较库中原有引用的前后审查结果
+#    （document 与下一步正式登记的载荷完全相同；预演本身不落库）
+curl -s -X POST http://localhost:8000/corpus/preview \
+  -H 'Content-Type: application/json' -d '{
+    "document": {
+      "doc_id": "REPEAL-ACT", "version": "2020", "name": "废止令",
+      "effective_at": "2020-06-01T00:00:00Z",
+      "clauses": [{"clause_id": "ART-1",
+                   "effective_at": "2020-06-01T00:00:00Z"}],
+      "revisions": [{"kind": "repeals",
+                     "predecessor_doc": "OLD-LAW",
+                     "predecessor_version": "2000",
+                     "predecessor_clause": "ART-1",
+                     "note": "本法生效之日起废止旧条例"}]
+    },
+    "target_at": "2021-01-01T00:00:00Z"
+  }'
+# => changed=1；changes[0].before.status="effective"（resolved 指向 2000 版），
+#    changes[0].after.status="repealed"，after 链路末步 terminal=true、
+#    effective_at="2020-06-01T00:00:00+00:00"
+
+# 4) 确认影响后正式登记同一版本（预演未留痕，不会报 409）
 curl -s -X POST http://localhost:8000/corpus \
   -H 'Content-Type: application/json' -d '{
     "doc_id": "REPEAL-ACT", "version": "2020", "name": "废止令",
@@ -214,13 +291,13 @@ curl -s -X POST http://localhost:8000/corpus \
                    "note": "本法生效之日起废止旧条例"}]
   }'
 
-# 4) 废止时刻之前审查：旧条款仍有效（resolved 指向 2000 版）
+# 5) 废止时刻之前审查：旧条款仍有效（resolved 指向 2000 版）
 curl -s -X POST http://localhost:8000/audit \
   -H 'Content-Type: application/json' \
   -d '{"target_at": "2020-05-31T00:00:00Z"}'
 # => "status": "effective"
 
-# 5) 到达废止时刻（登记版本生效时间，左闭右开）后审查：已废止
+# 6) 到达废止时刻（登记版本生效时间，左闭右开）后审查：已废止
 curl -s -X POST http://localhost:8000/audit \
   -H 'Content-Type: application/json' \
   -d '{"target_at": "2020-06-01T00:00:00Z"}'
@@ -233,7 +310,6 @@ curl -s -X POST http://localhost:8000/audit \
 - `GET /corpus/{doc_id}/{version}` —— 查看已写入的文档版本（条款/修订/引用）
 - `GET /health` —— 健康检查
 - `GET /docs` / `/openapi.json` —— 交互式文档与 OpenAPI 模式
-
 ---
 
 ## 四、解析算法
@@ -258,7 +334,7 @@ curl -s -X POST http://localhost:8000/audit \
 
 ```
 app/
-  main.py        FastAPI 路由与生命周期（SQLite WAL 连接）
+  main.py        FastAPI 路由与生命周期（SQLite WAL 连接；/corpus、/corpus/preview、/audit）
   schemas.py     Pydantic 输入模型、枚举、UTC 时间规范化
   response.py    响应模型
   database.py    SQLite 建表与读写（幂等校验、悬空引用告警）
@@ -266,7 +342,8 @@ app/
 scripts/
   seed_demo.py   演示语料写入脚本
 tests/
-  test_api.py    20 个端到端用例（含各分类、时区、幂等、分叉、循环、纯废止时刻）
+  test_api.py      20 个端到端用例（含各分类、时区、幂等、分叉、循环、纯废止时刻）
+  test_preview.py  11 个登记预演用例（前后对比、无残留、错误口径一致）
 Dockerfile
 docker-compose.yml
 requirements.txt
@@ -283,4 +360,6 @@ pytest -q
 链上条号变更解析、当日有效 / 已废止（明文废止终止点）/ 尚未生效、
 固定版本引用与固定版本缺失、目标不存在、分叉歧义（含每条分叉链路）、
 修订环、审查汇总计数、无接续纯废止的废止时刻（登记版本生效时间、
-左闭右开、固定引用、接续条款解析、自身更早失效优先）。
+左闭右开、固定引用、接续条款解析、自身更早失效优先），以及
+登记预演（前后对比仅列变化、草案自带引用不参与、成功与失败均无残留、
+之后可正常登记、409/422 与 /corpus 一致）。

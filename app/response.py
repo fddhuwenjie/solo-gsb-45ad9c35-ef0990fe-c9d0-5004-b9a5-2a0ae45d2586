@@ -85,6 +85,34 @@ class CorpusResponse(BaseModel):
     warnings: list[str]
 
 
+class PreviewChange(BaseModel):
+    """一条审查结果发生变化的引用：登记前 / 假定登记后的完整结果。"""
+
+    citation_id: int
+    before: CitationAudit
+    after: CitationAudit
+
+
+class PreviewResponse(BaseModel):
+    """POST /corpus/preview 的响应：仅列出受拟登记版本影响的存量引用。"""
+
+    doc_id: str
+    version: str
+    target_at: str
+    total_citations: int = Field(
+        ..., description="参与比较的库中原有引用总数（不含拟登记版本自带引用）"
+    )
+    changed: int = Field(
+        ..., description="结论 / 解析版本 / 链路发生变化的引用数"
+    )
+    warnings: list[str] = Field(
+        ..., description="拟登记版本的校验警告（与 POST /corpus 相同口径）"
+    )
+    changes: list[PreviewChange] = Field(
+        ..., description="发生变化的引用，按原引用 ID 升序"
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     database: str

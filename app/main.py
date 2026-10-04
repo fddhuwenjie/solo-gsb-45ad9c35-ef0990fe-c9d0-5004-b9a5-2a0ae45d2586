@@ -3,6 +3,8 @@
 端点
 ----
 * ``POST /corpus``            写入一个文档版本（条款/修订关系/引用），重复写入返回 409
+* ``POST /corpus/preview``    登记预演：假定拟登记版本已入库，比较库中原有引用
+                              在登记前后的审查结果（事务内完成并回滚，不落库）
 * ``GET  /corpus/{doc}/{ver}``查看已写入的文档版本
 * ``POST /audit``             按目标日期解析引用，分类并返回可追溯链路
 * ``GET  /health``            健康检查
@@ -21,8 +23,13 @@ from fastapi.responses import JSONResponse
 
 from . import database as db
 from .resolver import Graph, run_audit
-from .response import AuditResponse, CorpusResponse, HealthResponse
-from .schemas import AuditRequest, CorpusIn
+from .response import (
+    AuditResponse,
+    CorpusResponse,
+    HealthResponse,
+    PreviewResponse,
+)
+from .schemas import AuditRequest, CorpusIn, PreviewRequest
 
 
 @asynccontextmanager
@@ -58,6 +65,20 @@ def get_conn(request: Request) -> sqlite3.Connection:
     return request.app.state.conn
 
 
+def _raise_if_duplicate(
+    conn: sqlite3.Connection, doc_id: str, version: str
+) -> None:
+    """文档版本已写入时抛出 409（/corpus 与 /corpus/preview 同一口径）。"""
+    if db.document_version_exists(conn, doc_id, version) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"文档版本 {doc_id}@{version} 已写入，"
+                "相同文档版本不得重复写入；如需修订请使用新的版本号"
+            ),
+        )
+
+
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     """业务校验错误统一为 422。"""
@@ -80,17 +101,7 @@ def health(conn: sqlite3.Connection = Depends(get_conn)):
 )
 def create_corpus(payload: CorpusIn, conn: sqlite3.Connection = Depends(get_conn)):
     with _db_lock:
-        existing = db.document_version_exists(
-            conn, payload.doc_id, payload.version
-        )
-        if existing is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"文档版本 {payload.doc_id}@{payload.version} 已写入，"
-                    "相同文档版本不得重复写入；如需修订请使用新的版本号"
-                ),
-            )
+        _raise_if_duplicate(conn, payload.doc_id, payload.version)
         try:
             result = db.insert_corpus(conn, payload)
             conn.commit()
@@ -112,6 +123,71 @@ def create_corpus(payload: CorpusIn, conn: sqlite3.Connection = Depends(get_conn
             "citations": result["citations"],
         },
         "warnings": result["warnings"],
+    }
+
+
+@app.post(
+    "/corpus/preview",
+    response_model=PreviewResponse,
+    tags=["corpus"],
+    summary="登记预演：比较库中原有引用在登记前后的审查结果（不落库）",
+)
+def preview_corpus(
+    payload: PreviewRequest, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """假定 ``document`` 已登记，对库中原有引用做登记前/后两次审查。
+
+    两次审查基于同一份库状态（唯一差别是草案本身）；仅返回结论、
+    解析版本或链路发生变化的引用，按原引用 ID 升序。整个预演在
+    SAVEPOINT 内完成并回滚：无论成功或失败都不留下文档、条款、
+    修订关系或引用，之后仍可正常登记同一版本。
+    """
+    doc = payload.document
+    target = payload.target_at or datetime.now(timezone.utc)
+
+    with _db_lock:
+        _raise_if_duplicate(conn, doc.doc_id, doc.version)
+
+        # 登记前审查：引用清单在草案写入前抓取，拟登记版本自带的
+        # 引用因此天然不参与比较；前后两次审查复用同一批引用行，
+        # 保证除草案外基于完全相同的库状态。
+        citations = db.list_citations(conn)
+        before = run_audit(
+            Graph(db.list_clauses(conn), db.list_edges(conn)),
+            citations,
+            target,
+        )
+
+        # 假定登记：复用 /corpus 的写入与校验（非法关系抛 ValueError
+        # -> 422，与正式登记一致），审查后整体回滚，不留任何痕迹。
+        conn.execute("SAVEPOINT corpus_preview")
+        try:
+            inserted = db.insert_corpus(conn, doc)
+            after = run_audit(
+                Graph(db.list_clauses(conn), db.list_edges(conn)),
+                citations,
+                target,
+            )
+        finally:
+            conn.execute("ROLLBACK TO corpus_preview")
+            conn.execute("RELEASE corpus_preview")
+            conn.rollback()  # 兜底：确保连接不残留未提交事务
+
+    changes = [
+        {"citation_id": b["citation_id"], "before": b, "after": a}
+        for b, a in zip(before["results"], after["results"])
+        if b["status"] != a["status"]
+        or b["resolved"] != a["resolved"]
+        or b["chains"] != a["chains"]
+    ]
+    return {
+        "doc_id": doc.doc_id,
+        "version": doc.version,
+        "target_at": target.isoformat(),
+        "total_citations": len(citations),
+        "changed": len(changes),
+        "warnings": inserted["warnings"],
+        "changes": changes,
     }
 
 
