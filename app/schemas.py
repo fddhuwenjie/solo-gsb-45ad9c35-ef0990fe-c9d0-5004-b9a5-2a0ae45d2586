@@ -193,3 +193,25 @@ class AuditRequest(BaseModel):
     source_version: Optional[str] = Field(None, description="仅审查该版本发出的引用")
     source_clause: Optional[str] = Field(None, description="仅审查该源条文发出的引用")
     target_doc: Optional[str] = Field(None, description="仅审查指向该文档的引用")
+
+
+class RehearsalRequest(BaseModel):
+    """POST /rehearse 的请求体：拟登记版本 + 预演目标日期（+ 可选过滤）。
+
+    ``candidate`` 的格式与 ``POST /corpus`` 请求体完全一致，复用其全部
+    校验与错误响应；预演不会真正写入任何数据。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate: CorpusIn = Field(
+        ..., description="拟登记的文档版本（字段与 POST /corpus 请求体相同）"
+    )
+    target_at: Optional[UtcDatetime] = Field(
+        None,
+        description="预演审查的目标日期时间；缺省为当前 UTC 时间；仅日期按 UTC 00:00",
+    )
+    source_doc: Optional[str] = Field(None, description="仅比较该文档版本发出的引用")
+    source_version: Optional[str] = Field(None, description="仅比较该版本发出的引用")
+    source_clause: Optional[str] = Field(None, description="仅比较该源条文发出的引用")
+    target_doc: Optional[str] = Field(None, description="仅比较指向该文档的引用")

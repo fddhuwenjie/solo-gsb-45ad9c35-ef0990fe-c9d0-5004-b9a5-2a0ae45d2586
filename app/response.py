@@ -85,6 +85,37 @@ class CorpusResponse(BaseModel):
     warnings: list[str]
 
 
+class RehearseChangedCitation(BaseModel):
+    """一条前后结论/解析版本/链路发生变化的存量引用。"""
+
+    citation_id: int
+    changes: list[str] = Field(
+        ..., description="变化项：status / resolved / chains"
+    )
+    before: CitationAudit = Field(
+        ..., description="假定登记前、基于当前库状态的完整审查结果"
+    )
+    after: CitationAudit = Field(
+        ..., description="假定登记后、基于同一份库状态叠加拟登记版本的完整审查结果"
+    )
+
+
+class RehearseResponse(BaseModel):
+    candidate: dict
+    target_at: str
+    total: int = Field(..., description="参与比较的存量引用数量（不含拟登记版本自带引用）")
+    changed: int = Field(..., description="结论/解析版本/链路发生变化的引用数量")
+    changes: list[RehearseChangedCitation] = Field(
+        ..., description="变化引用清单，按原引用 ID 升序"
+    )
+    projected_counts: dict[str, int] = Field(
+        ..., description="拟登记版本若正式登记时返回的写入计数"
+    )
+    projected_warnings: list[str] = Field(
+        ..., description="拟登记版本若正式登记时产生的 warnings"
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     database: str
